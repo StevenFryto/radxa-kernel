@@ -512,6 +512,8 @@ static int rockchip_spi_prepare_dma(struct rockchip_spi *rs,
 			.src_maxburst = rockchip_spi_calc_burst_size(xfer->len / rs->n_bytes),
 		};
 
+		// dev_info(rs->dev, "**Inband** after setup, rx.src_addr = %llx\n, rx.src_addr_width = %d\n, rx.src_maxburst = %d\n", rxconf.src_addr, rxconf.src_addr_width, rxconf.src_maxburst);
+
 		dmaengine_slave_config(ctlr->dma_rx, &rxconf);
 
 		rxdesc = dmaengine_prep_slave_sg(
@@ -533,6 +535,8 @@ static int rockchip_spi_prepare_dma(struct rockchip_spi *rs,
 			.dst_addr_width = rs->n_bytes,
 			.dst_maxburst = rs->fifo_len / 4,
 		};
+
+		// dev_info(rs->dev, "**Inband** after setup, tx.dst_addr = %llx\n, tx.dst_addr_width = %d\n, tx.dst_maxburst = %d\n", txconf.dst_addr, txconf.dst_addr_width, txconf.dst_maxburst);
 
 		dmaengine_slave_config(ctlr->dma_tx, &txconf);
 
@@ -722,6 +726,10 @@ static int rockchip_spi_config(struct rockchip_spi *rs,
 	writel_relaxed(rockchip_spi_calc_burst_size(xfer->len / rs->n_bytes) - 1,
 		       rs->regs + ROCKCHIP_SPI_DMARDLR);
 	writel_relaxed(dmacr, rs->regs + ROCKCHIP_SPI_DMACR);
+
+	// dev_info(rs->dev, "**Inband** spi_config, dmacr's value: %d, rs->fifo_len(tdlr): %d, rs->n_bytes: %d, burst_size(rdlr): %d\n",
+	// 	dmacr, rs->fifo_len / 2 - 1, rs->n_bytes,
+	// 	rockchip_spi_calc_burst_size(xfer->len / rs->n_bytes) - 1);
 
 	if (rs->max_baud_div_in_cpha && xfer->speed_hz != rs->speed_hz) {
 		/* the minimum divisor is 2 */
@@ -938,6 +946,7 @@ static int rockchip_spi_transfer_one(
 	}
 
 	rs->n_bytes = xfer->bits_per_word <= 8 ? 1 : 2;
+	// dev_info(rs->dev, "**Inband** bits_per_word: %d, n_bytes: %d, xfer->len: %d\n", xfer->bits_per_word, rs->n_bytes, xfer->len);
 	rs->xfer = xfer;
 	if (rs->poll || rs->retry_poll_active) {
 		xfer_mode = ROCKCHIP_SPI_POLL;
@@ -1028,6 +1037,11 @@ static int rockchip_spi_setup(struct spi_device *spi)
 static int rockchip_spi_prepare_oob_transfer(struct spi_controller *ctlr,
 					struct spi_oob_transfer *xfer)
 {
+	struct dma_async_tx_descriptor *desc;
+	dma_cookie_t cookie;
+	dma_addr_t addr;
+	size_t len = xfer->setup.frame_len;
+	int ret;
 	if (xfer->setup.frame_len > ROCKCHIP_SPI_MAX_TRANLEN - 3)
 		return -EINVAL;
 
@@ -1038,6 +1052,12 @@ static int rockchip_spi_prepare_oob_transfer(struct spi_controller *ctlr,
 	rs->n_bytes = xfer->setup.bits_per_word <= 8 ? 1 : 2;
 	dev_info(rs->dev, "after setup, rs->n_bytes = %d\n", rs->n_bytes);
 
+	struct spi_device *spi = xfer->spi;
+	rockchip_spi_oob_config(rs, spi, xfer, ctlr->slave_abort);
+
+	/* RX to first half of I/O buffer. */
+	addr = xfer->dma_addr;
+	dev_info(&ctlr->dev, "rk_spi_prepare_oob_transfer, rx's addr = %llx\n", (unsigned long long)addr);
 
 	struct dma_slave_config rxconf = {
 		.direction = DMA_DEV_TO_MEM,
@@ -1049,6 +1069,24 @@ static int rockchip_spi_prepare_oob_transfer(struct spi_controller *ctlr,
 
 	dmaengine_slave_config(ctlr->dma_rx, &rxconf);
 
+	desc = dmaengine_prep_slave_single(ctlr->dma_rx, addr, len,
+					DMA_DEV_TO_MEM,
+					DMA_OOB_INTERRUPT|DMA_OOB_PULSE);
+	if (!desc) {
+		ret = -EIO;
+		return ret;
+	}
+
+	desc->callback = xfer->setup.xfer_done;
+	desc->callback_param = xfer;
+
+	xfer->rxd = desc;
+
+	/* TX to second half of I/O buffer. */
+	addr = xfer->dma_addr + xfer->aligned_frame_len;
+	dev_info(&ctlr->dev, "rk_spi_prepare_oob_transfer, tx's addr = %llx, xfer->setup.frame_len = "
+			"%zu, xfer->aligned_frame_len = %zu\n", (unsigned long long)addr, len, xfer->aligned_frame_len);
+	
 	struct dma_slave_config txconf = {
 		.direction = DMA_MEM_TO_DEV,
 		.dst_addr = rs->dma_addr_tx,
@@ -1059,6 +1097,27 @@ static int rockchip_spi_prepare_oob_transfer(struct spi_controller *ctlr,
 
 	dmaengine_slave_config(ctlr->dma_tx, &txconf);
 
+	desc = dmaengine_prep_slave_single(ctlr->dma_tx, addr, len,
+					DMA_MEM_TO_DEV,
+					DMA_OOB_INTERRUPT|DMA_OOB_PULSE);
+	if (!desc)
+		return -EIO;
+
+	xfer->txd = desc;
+
+	cookie = dmaengine_submit(desc);
+	// ret = dma_submit_error(cookie);
+	dma_async_issue_pending(ctlr->dma_rx);
+
+	if (rs->cs_inactive)
+		writel_relaxed(INT_CS_INACTIVE, rs->regs + ROCKCHIP_SPI_IMR);
+
+	spi_enable_chip(rs, true);
+
+	cookie = dmaengine_submit(desc);
+	// ret = dma_submit_error(cookie);
+	dma_async_issue_pending(ctlr->dma_tx);
+
 	return 0;
 }
 
@@ -1067,8 +1126,8 @@ static void rockchip_spi_start_oob_transfer(struct spi_controller *ctlr,
 {
 	struct rockchip_spi *rs = spi_controller_get_devdata(ctlr);
 	dev_info(rs->dev, "call rockchip_spi_start_oob_transfer\n");
-	struct spi_device *spi = xfer->spi;
-	rockchip_spi_oob_config(rs, spi, xfer, ctlr->slave_abort);
+	// struct spi_device *spi = xfer->spi;
+	// rockchip_spi_oob_config(rs, spi, xfer, ctlr->slave_abort);
 	if (rs->cs_inactive)
 		writel_relaxed(INT_CS_INACTIVE, rs->regs + ROCKCHIP_SPI_IMR);
 

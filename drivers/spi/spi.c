@@ -4450,63 +4450,63 @@ static int bus_unlock_oob(struct spi_controller *ctlr)
 	return 0;
 }
 
-static int prepare_oob_dma(struct spi_controller *ctlr,
-			struct spi_oob_transfer *xfer)
-{
-	dev_info(&ctlr->dev, "call prepare_oob_dma\n");
-	struct dma_async_tx_descriptor *desc;
-	size_t len = xfer->setup.frame_len;
-	dma_cookie_t cookie;
-	dma_addr_t addr;
-	int ret;
+// static int prepare_oob_dma(struct spi_controller *ctlr,
+// 			struct spi_oob_transfer *xfer)
+// {
+// 	dev_info(&ctlr->dev, "call prepare_oob_dma\n");
+// 	struct dma_async_tx_descriptor *desc;
+// 	size_t len = xfer->setup.frame_len;
+// 	dma_cookie_t cookie;
+// 	dma_addr_t addr;
+// 	int ret;
 
-	/* TX to second half of I/O buffer. */
-	addr = xfer->dma_addr + xfer->aligned_frame_len;
-	dev_info(&ctlr->dev, "call prepare_oob_dma, tx's addr = %llx, xfer->setup.frame_len = "
-			"%zu, xfer->aligned_frame_len = %zu\n", (unsigned long long)addr, len, xfer->aligned_frame_len);
-	desc = dmaengine_prep_slave_single(ctlr->dma_tx, addr, len,
-					DMA_MEM_TO_DEV,
-					DMA_OOB_INTERRUPT|DMA_OOB_PULSE);
-	if (!desc)
-		return -EIO;
+// 	/* TX to second half of I/O buffer. */
+// 	addr = xfer->dma_addr + xfer->aligned_frame_len;
+// 	dev_info(&ctlr->dev, "call prepare_oob_dma, tx's addr = %llx, xfer->setup.frame_len = "
+// 			"%zu, xfer->aligned_frame_len = %zu\n", (unsigned long long)addr, len, xfer->aligned_frame_len);
+// 	desc = dmaengine_prep_slave_single(ctlr->dma_tx, addr, len,
+// 					DMA_MEM_TO_DEV,
+// 					DMA_OOB_INTERRUPT|DMA_OOB_PULSE);
+// 	if (!desc)
+// 		return -EIO;
 
-	xfer->txd = desc;
-	cookie = dmaengine_submit(desc);
-	ret = dma_submit_error(cookie);
-	if (ret)
-		return ret;
+// 	xfer->txd = desc;
+// 	cookie = dmaengine_submit(desc);
+// 	ret = dma_submit_error(cookie);
+// 	if (ret)
+// 		return ret;
 
-	dma_async_issue_pending(ctlr->dma_tx);
+// 	dma_async_issue_pending(ctlr->dma_tx);
 
-	/* RX to first half of I/O buffer. */
-	addr = xfer->dma_addr;
-	dev_info(&ctlr->dev, "call prepare_oob_dma, rx's addr = %llx\n", (unsigned long long)addr);
-	desc = dmaengine_prep_slave_single(ctlr->dma_rx, addr, len,
-					DMA_DEV_TO_MEM,
-					DMA_OOB_INTERRUPT|DMA_OOB_PULSE);
-	if (!desc) {
-		ret = -EIO;
-		goto fail_rx;
-	}
+// 	/* RX to first half of I/O buffer. */
+// 	addr = xfer->dma_addr;
+// 	dev_info(&ctlr->dev, "call prepare_oob_dma, rx's addr = %llx\n", (unsigned long long)addr);
+// 	desc = dmaengine_prep_slave_single(ctlr->dma_rx, addr, len,
+// 					DMA_DEV_TO_MEM,
+// 					DMA_OOB_INTERRUPT|DMA_OOB_PULSE);
+// 	if (!desc) {
+// 		ret = -EIO;
+// 		goto fail_rx;
+// 	}
 
-	desc->callback = xfer->setup.xfer_done;
-	desc->callback_param = xfer;
+// 	desc->callback = xfer->setup.xfer_done;
+// 	desc->callback_param = xfer;
 
-	xfer->rxd = desc;
-	cookie = dmaengine_submit(desc);
-	ret = dma_submit_error(cookie);
-	if (ret)
-		goto fail_rx;
+// 	xfer->rxd = desc;
+// 	cookie = dmaengine_submit(desc);
+// 	ret = dma_submit_error(cookie);
+// 	if (ret)
+// 		goto fail_rx;
 
-	dma_async_issue_pending(ctlr->dma_rx);
+// 	dma_async_issue_pending(ctlr->dma_rx);
 
-	return 0;
+// 	return 0;
 
-fail_rx:
-	dmaengine_terminate_sync(ctlr->dma_tx);
+// fail_rx:
+// 	dmaengine_terminate_sync(ctlr->dma_tx);
 
-	return ret;
-}
+// 	return ret;
+// }
 
 static void unprepare_oob_dma(struct spi_controller *ctlr)
 {
@@ -4605,9 +4605,9 @@ int spi_prepare_oob_transfer(struct spi_device *spi,
 	if (ret)
 		goto fail_prep_xfer;
 
-	ret = prepare_oob_dma(ctlr, xfer);
-	if (ret)
-		goto fail_prep_dma;
+	// ret = prepare_oob_dma(ctlr, xfer);
+	// if (ret)
+	// 	goto fail_prep_dma;
 
 	ret = bus_lock_oob(ctlr);
 	if (ret)
@@ -4617,8 +4617,8 @@ int spi_prepare_oob_transfer(struct spi_device *spi,
 
 fail_bus_lock:
 	bus_unlock_oob(ctlr);
-fail_prep_dma:
-	unprepare_oob_dma(ctlr);
+// fail_prep_dma:
+// 	unprepare_oob_dma(ctlr);
 fail_prep_xfer:
 	dma_free_coherent(ctlr->dev.parent, iolen, iobuf, dma_addr);
 
