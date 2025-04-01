@@ -2383,6 +2383,7 @@ static void pl330_tasklet(struct tasklet_struct *t)
 	fill_queue(pch);
 
 	if (list_empty(&pch->work_list)) {
+		// TODO: 可能带外可能带内
 		raw_spin_lock(&pch->thread->dmac->oob_lock);
 		_stop(pch->thread);
 		raw_spin_unlock(&pch->thread->dmac->oob_lock);
@@ -2406,6 +2407,8 @@ static void pl330_tasklet(struct tasklet_struct *t)
 		dev_info(pch->dmac->ddma.dev, "%s:%d req->desc = %p, flag=%x\n",
 			__func__, __LINE__, req->desc, req->desc->txd.flags);
 		if (!pl330_oob_capable() || !pl330_oob_pulsed(req->desc)) {
+			pr_info("pl330_tasklet, run start_thread: %s:%d req->desc = %p, flag=%x\n",
+				__func__, __LINE__, req->desc, req->desc->txd.flags);
 			pl330_start_thread(pch->thread);
 		}
 		raw_spin_unlock(&pch->thread->dmac->oob_lock);

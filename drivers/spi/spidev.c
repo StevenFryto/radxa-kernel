@@ -386,9 +386,9 @@ static int enable_oob_mode(struct spidev_data *spidev,
 	xfer->setup.speed_hz = oob_setup.speed_hz;
 	xfer->setup.bits_per_word = oob_setup.bits_per_word;
 	xfer->setup.xfer_done = oob_transfer_done;
-	ret = spi_prepare_oob_transfer(spidev->spi, xfer);
-	if (ret)
-		goto out;
+	// ret = spi_prepare_oob_transfer(spidev->spi, xfer);
+	// if (ret)
+	// 	goto out;
 
 	tx_offset = (__u32)spi_get_oob_txoff(xfer);
 	put_user(tx_offset, &u_ioc->tx_offset);
@@ -398,7 +398,10 @@ static int enable_oob_mode(struct spidev_data *spidev,
 	put_user(iobuf_len, &u_ioc->iobuf_len);
 
 	evl_clear_flag(&spidev->oob.flag);
-	spi_start_oob_transfer(xfer);
+	ret = spi_prepare_oob_transfer(spidev->spi, xfer);
+	if (ret)
+		goto out;
+	// spi_start_oob_transfer(xfer);
 	spidev->oob.enabled = true;
 out:
 	evl_up(&spidev->oob.sem);

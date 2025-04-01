@@ -496,6 +496,33 @@ static u32 rockchip_spi_calc_burst_size(u32 data_len)
 	return i;
 }
 
+static int spi_pulse_transfer(struct spi_controller *ctlr, struct spi_transfer *xfer) /* oob stage */
+{
+	int ret;
+
+	struct rockchip_spi *rs = spi_controller_get_devdata(ctlr);
+	dev_info(rs->dev, "call rockchip_spi_pulse_transfer\n");
+
+	/* unfortunately setting the fifo threshold level to generate an
+	 * interrupt exactly when the fifo is full doesn't seem to work,
+	 * so we need the strict inequality here
+	 */
+	 if ((xfer->len / rs->n_bytes) < rs->fifo_len)
+		writel_relaxed(xfer->len / rs->n_bytes - 1, rs->regs + ROCKCHIP_SPI_RXFTLR);
+ 	else
+		writel_relaxed(rs->fifo_len / 2 - 1, rs->regs + ROCKCHIP_SPI_RXFTLR);
+
+ 	writel_relaxed(rs->fifo_len / 2 - 1, rs->regs + ROCKCHIP_SPI_DMATDLR);
+ 	writel_relaxed(rockchip_spi_calc_burst_size(xfer->len / rs->n_bytes) - 1,
+			rs->regs + ROCKCHIP_SPI_DMARDLR);
+
+	ret = dma_pulse_oob(ctlr->dma_rx);
+	if (likely(!ret))
+		ret = dma_pulse_oob(ctlr->dma_tx);
+
+	return ret;
+}
+
 static int rockchip_spi_prepare_dma(struct rockchip_spi *rs,
 		struct spi_controller *ctlr, struct spi_transfer *xfer)
 {
@@ -519,7 +546,7 @@ static int rockchip_spi_prepare_dma(struct rockchip_spi *rs,
 		rxdesc = dmaengine_prep_slave_sg(
 				ctlr->dma_rx,
 				xfer->rx_sg.sgl, xfer->rx_sg.nents,
-				DMA_DEV_TO_MEM, DMA_PREP_INTERRUPT);
+				DMA_DEV_TO_MEM, DMA_OOB_INTERRUPT|DMA_OOB_PULSE);
 		if (!rxdesc)
 			return -EINVAL;
 
@@ -543,7 +570,7 @@ static int rockchip_spi_prepare_dma(struct rockchip_spi *rs,
 		txdesc = dmaengine_prep_slave_sg(
 				ctlr->dma_tx,
 				xfer->tx_sg.sgl, xfer->tx_sg.nents,
-				DMA_MEM_TO_DEV, DMA_PREP_INTERRUPT);
+				DMA_MEM_TO_DEV, DMA_OOB_INTERRUPT|DMA_OOB_PULSE);
 		if (!txdesc) {
 			if (rxdesc)
 				dmaengine_terminate_sync(ctlr->dma_rx);
@@ -559,6 +586,7 @@ static int rockchip_spi_prepare_dma(struct rockchip_spi *rs,
 		atomic_or(RXDMA, &rs->state);
 		ctlr->dma_rx->cookie = dmaengine_submit(rxdesc);
 		dma_async_issue_pending(ctlr->dma_rx);
+		dev_info(rs->dev, "rxdesc->cookie = %d\n", ctlr->dma_rx->cookie);
 	}
 
 	if (rs->cs_inactive)
@@ -570,7 +598,10 @@ static int rockchip_spi_prepare_dma(struct rockchip_spi *rs,
 		atomic_or(TXDMA, &rs->state);
 		dmaengine_submit(txdesc);
 		dma_async_issue_pending(ctlr->dma_tx);
+		dev_info(rs->dev, "txdesc->cookie = %d\n", ctlr->dma_tx->cookie);
 	}
+
+	spi_pulse_transfer(ctlr, xfer);
 
 	/* 1 means the transfer is in progress */
 	return 1;
@@ -777,6 +808,7 @@ static void rockchip_spi_oob_config(struct rockchip_spi *rs,
 	if (spi->mode & SPI_CS_HIGH && !spi_get_csgpiod(spi, 0))
 		cr0 |= BIT(spi->chip_select) << CR0_SOI_OFFSET;
 
+	// TODO:
 	cr0 |= CR0_XFM_TR << CR0_XFM_OFFSET;
 
 	switch (xfer->setup.bits_per_word) {
@@ -1037,7 +1069,7 @@ static int rockchip_spi_setup(struct spi_device *spi)
 static int rockchip_spi_prepare_oob_transfer(struct spi_controller *ctlr,
 					struct spi_oob_transfer *xfer)
 {
-	struct dma_async_tx_descriptor *desc;
+	struct dma_async_tx_descriptor *txdesc, *rxdesc;
 	dma_cookie_t cookie;
 	dma_addr_t addr;
 	size_t len = xfer->setup.frame_len;
@@ -1046,6 +1078,8 @@ static int rockchip_spi_prepare_oob_transfer(struct spi_controller *ctlr,
 		return -EINVAL;
 
 	struct rockchip_spi *rs = spi_controller_get_devdata(ctlr);
+	WARN_ON(readl_relaxed(rs->regs + ROCKCHIP_SPI_SSIENR) &&
+		(readl_relaxed(rs->regs + ROCKCHIP_SPI_SR) & SR_BUSY));
 	dev_info(rs->dev, "enter rockchip_spi_prepare_oob_transfer, xfer->setup.frame_len = %d\n", xfer->setup.frame_len);
 
 	dev_info(rs->dev, "before setup, rs->n_bytes = %d\n", rs->n_bytes);
@@ -1069,18 +1103,18 @@ static int rockchip_spi_prepare_oob_transfer(struct spi_controller *ctlr,
 
 	dmaengine_slave_config(ctlr->dma_rx, &rxconf);
 
-	desc = dmaengine_prep_slave_single(ctlr->dma_rx, addr, len,
+	rxdesc = dmaengine_prep_slave_single(ctlr->dma_rx, addr, len,
 					DMA_DEV_TO_MEM,
 					DMA_OOB_INTERRUPT|DMA_OOB_PULSE);
-	if (!desc) {
+	if (!rxdesc) {
 		ret = -EIO;
 		return ret;
 	}
 
-	desc->callback = xfer->setup.xfer_done;
-	desc->callback_param = xfer;
+	rxdesc->callback = xfer->setup.xfer_done;
+	rxdesc->callback_param = xfer;
 
-	xfer->rxd = desc;
+	xfer->rxd = rxdesc;
 
 	/* TX to second half of I/O buffer. */
 	addr = xfer->dma_addr + xfer->aligned_frame_len;
@@ -1097,16 +1131,18 @@ static int rockchip_spi_prepare_oob_transfer(struct spi_controller *ctlr,
 
 	dmaengine_slave_config(ctlr->dma_tx, &txconf);
 
-	desc = dmaengine_prep_slave_single(ctlr->dma_tx, addr, len,
+	txdesc = dmaengine_prep_slave_single(ctlr->dma_tx, addr, len,
 					DMA_MEM_TO_DEV,
 					DMA_OOB_INTERRUPT|DMA_OOB_PULSE);
-	if (!desc)
+	if (!txdesc)
 		return -EIO;
 
-	xfer->txd = desc;
+	xfer->txd = txdesc;
 
-	cookie = dmaengine_submit(desc);
-	// ret = dma_submit_error(cookie);
+	ctlr->dma_rx->cookie = dmaengine_submit(rxdesc);
+	ret = dma_submit_error(cookie);
+	if (ret)
+		return ret;
 	dma_async_issue_pending(ctlr->dma_rx);
 
 	if (rs->cs_inactive)
@@ -1114,8 +1150,10 @@ static int rockchip_spi_prepare_oob_transfer(struct spi_controller *ctlr,
 
 	spi_enable_chip(rs, true);
 
-	cookie = dmaengine_submit(desc);
-	// ret = dma_submit_error(cookie);
+	cookie = dmaengine_submit(txdesc);
+	ret = dma_submit_error(cookie);
+	if (ret)
+		return ret;
 	dma_async_issue_pending(ctlr->dma_tx);
 
 	return 0;
@@ -1128,10 +1166,10 @@ static void rockchip_spi_start_oob_transfer(struct spi_controller *ctlr,
 	dev_info(rs->dev, "call rockchip_spi_start_oob_transfer\n");
 	// struct spi_device *spi = xfer->spi;
 	// rockchip_spi_oob_config(rs, spi, xfer, ctlr->slave_abort);
-	if (rs->cs_inactive)
-		writel_relaxed(INT_CS_INACTIVE, rs->regs + ROCKCHIP_SPI_IMR);
+	// if (rs->cs_inactive)
+	// 	writel_relaxed(INT_CS_INACTIVE, rs->regs + ROCKCHIP_SPI_IMR);
 
-	spi_enable_chip(rs, true);
+	// spi_enable_chip(rs, true);
 }
 
 static void rockchip_spi_pulse_oob_transfer(struct spi_controller *ctlr,
